@@ -21,7 +21,7 @@ object ItemCF {
     val spark = SparkSession
       .builder()
       .appName(this.getClass.getSimpleName)
-      .master("local[*]")
+//      .master("local[*]")
       .enableHiveSupport()
       .getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
@@ -29,7 +29,7 @@ object ItemCF {
 //  导入数据，并转成dataFrame的格式
     import spark.implicits._
     var data = spark.sparkContext
-      .textFile("C:\\Users\\cm\\recommends\\movielens\\ratings.dat")
+      .textFile("C:\\Users\\cm\\IdeaProjects\\recommends\\movielens\\ratings.dat")
       .map(_.split("::"))
       .map(attributes => Rating(attributes(0), attributes(1), attributes(2).trim.toDouble))
       .toDF()
@@ -124,7 +124,7 @@ object ItemCF {
   def recommend4All(data: DataFrame, similarityMatrix: Array[Array[Double]], threshold:Double) = {
     val parseData = parseDataEntry(data)
     val ratings_coorMatrix = new CoordinateMatrix(parseData)
-    val users_recommends = ratings_coorMatrix.toIndexedRowMatrix().rows.mapPartitions(par =>{
+    val users_recommends = ratings_coorMatrix.toIndexedRowMatrix().rows.repartition(300).mapPartitions(par =>{
       val users_array = new ArrayBuffer[(Double,Double,Double)]()
       par.foreach(user =>{
         val userId = user.index //用户的userIndex
