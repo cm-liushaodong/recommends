@@ -1,12 +1,14 @@
 package itemcf
 
 import org.apache.spark.ml.feature.{IndexToString, StringIndexer}
+import org.apache.spark.mllib.linalg
 import org.apache.spark.mllib.linalg.distributed.{CoordinateMatrix, IndexedRow, MatrixEntry}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
+import scala.util.control.Breaks._
 
 /**
   * itemcf算法的scala实现，数据集采用的是movielens数据集
@@ -29,7 +31,7 @@ object ItemCF {
 //  导入数据，并转成dataFrame的格式
     import spark.implicits._
     var data = spark.sparkContext
-      .textFile("C:\\Users\\cm\\recommends\\movielens\\ratings.dat")
+      .textFile("movielens\\ratings.dat")
       .map(_.split("::"))
       .map(attributes => Rating(attributes(0), attributes(1), attributes(2).trim.toDouble))
       .toDF()
@@ -47,7 +49,7 @@ object ItemCF {
 //    data.printSchema()
     val similarityMatrix = getSimilarityMatrix(data)
 //    为所有的用户进行推荐
-    var result = recommend4All(data,similarityMatrix,0).toDF("userIndex","itemIndex","score")
+    var result = recommend4All(data,similarityMatrix,0.5,60).toDF("userIndex","itemIndex","score")
     result.createOrReplaceTempView("result_table")
 //    将数据预处理过程中添加的索引，再还原成原字符串
     result = spark.sql(
@@ -59,7 +61,7 @@ object ItemCF {
         |ON table1.itemIndex = table3.itemIndex) table
         |GROUP BY user, item
       """.stripMargin)
-    println(" recommends results  ")
+    println("--recommends results--")
     result.show()
   }
   /**
@@ -116,39 +118,85 @@ object ItemCF {
     })
     parseData
   }
+
   /**
-    * 为所有的用户进行推荐
-    * @param data
+    * 获得top-N个推荐结果，包括itemId和相应的得分
+    * @param user_vector
     * @param similarityMatrix
+    * @param user_hisItems
+    * @param score_mean
+    * @param maxNum
+    * @param threshold
+    * @return
     */
-  def recommend4All(data: DataFrame, similarityMatrix: Array[Array[Double]], threshold:Double) = {
-    val parseData = parseDataEntry(data)
-    val ratings_coorMatrix = new CoordinateMatrix(parseData)
-    val users_recommends = ratings_coorMatrix.toIndexedRowMatrix().rows.mapPartitions(par =>{
-      val users_array = new ArrayBuffer[(Double,Double,Double)]()
-      par.foreach(user =>{
-        val userId = user.index //用户的userIndex
-        val user_vector = user.vector //该用户访问过的历史item以及打分数据
-        val user_hisItems = new mutable.HashSet[Double]()
-        for(i<- 0 until user_vector.size){
-          if(user_vector(i)!=0){
-            user_hisItems.add(i)
-          }
-        }//用户访问过的items，已经存储到user_hisItems
-        //为用户生成推荐列表
-        for(i<- 0 until user_vector.size){
-          if(user_vector(i)!=0){
-            val item = similarityMatrix(i) //与主题i相似的所有主题
-            for(j<- 0 until item.length){
-              if(item(j)>=threshold & !user_hisItems.contains(j)){
-                users_array.+=((userId,j,item(j)))
-              }
+  def top_N(user_id: Long, user_vector: linalg.Vector, similarityMatrix: Array[Array[Double]], user_hisItems: mutable.HashSet[Double], score_mean: Double, maxNum: Int, threshold: Double) = {
+    val score_arr = new Array[Double](similarityMatrix.length)
+    val single_user_arr = new ArrayBuffer[(Int,Int,Double)]()
+    for(i<- 0 until user_vector.size){
+      if(user_vector(i)>=score_mean){
+        val items = similarityMatrix(i) //与主题i相似的所有主题
+        for(j<- 0 until items.length){
+          if(items(j)>=threshold && !user_hisItems.contains(j)){
+            if(score_arr(j) < items(j)*user_vector(i)){
+              score_arr(j) = items(j)*user_vector(i)
             }
           }
         }
-      })
-      users_array.iterator
-    })
-    users_recommends
+      }
+    }
+    // 取maxNum个最大的值
+    breakable{
+      for(i <- 0 until maxNum){
+        var max = (0,0.0)
+        for(j <- 0 until score_arr.length){
+          if(max._2 < score_arr(j)){
+            max = (j,score_arr(j))
+          }
+        }
+        if(max._2 == 0){
+          break
+        }
+        single_user_arr.+=((user_id.toInt,max._1,max._2))
+        score_arr(max._1) = 0
+      }
+    }
+    single_user_arr
   }
+
+  /**
+    * 为所有的用户进行items推荐
+    * @param data
+    * @param similarityMatrix
+    * @param threshold
+    * @param maxNum
+    * @return
+    */
+  def recommend4All(data: DataFrame, similarityMatrix: Array[Array[Double]], threshold:Double, maxNum:Int):RDD[(Int,Int,Double)] = {
+    val parseData = parseDataEntry(data)
+    val ratings_coorMatrix = new CoordinateMatrix(parseData)
+    val users_recommends = ratings_coorMatrix.toIndexedRowMatrix().rows.mapPartitions(par=>{
+      val users_arr = new ArrayBuffer[(Int,Int,Double)]()
+      par.foreach(user=>{
+        val userId = user.index //用户的userIndex
+        val user_vector = user.vector //该用户访问过的历史item以及打分数据
+        val user_hisItems = new mutable.HashSet[Double]()
+        var items_num = 0
+        var items_scores = 0.0
+        for(i<- 0 until user_vector.size){//用户访问过的items，已经存储到user_hisItems
+          if(user_vector(i)!=0){
+            user_hisItems.add(i)
+            items_num = items_num + 1
+            items_scores = items_scores + user_vector(i)
+          }
+        }
+        val score_mean = items_scores/items_num
+        //为用户生成推荐列表，只选取相似度最高的Top-N进行推荐，且限制相似度要大于给定的threshold
+        val top_N_items = top_N(userId,user_vector,similarityMatrix,user_hisItems,score_mean,maxNum,threshold)
+        users_arr ++= top_N_items
+      })
+      users_arr.iterator
+    })
+      users_recommends
+  }
+
 }
