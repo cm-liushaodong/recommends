@@ -31,6 +31,6 @@ object UserCF {
     val item_index_map = data.select("item","itemIndex").distinct()
     item_index_map.createGlobalTempView("item_map")
     data = data.select("userIndex","itemIndex","score")
-
+//    data.show()
   }
 }

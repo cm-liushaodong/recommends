@@ -11,6 +11,7 @@
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
+    <orderEntry type="library" name="scala-sdk-2.12.8" level="application" />
     <orderEntry type="library" name="Maven: org.scala-lang:scala-library:2.12.8" level="project" />
     <orderEntry type="library" name="Maven: org.apache.spark:spark-core_2.12:2.4.3" level="project" />
     <orderEntry type="library" name="Maven: com.thoughtworks.paranamer:paranamer:2.8" level="project" />
